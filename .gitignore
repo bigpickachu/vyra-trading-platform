@@ -1,0 +1,38 @@
+# Dependencias - nunca entram no repo
+node_modules/
+venv/
+venv-vyra/
+.venv/
+
+# Python compilado
+__pycache__/
+*.pyc
+
+# Segredos - vivem em variaveis de ambiente, nunca no repo
+.env
+.env.*
+vyra-firebase-key.json
+*-firebase-key.json
+
+# Estado vivo do bot - local, muda a cada tick
+bot_state.json
+
+# Fosseis de debug - historico local, nao publicado
+*.bak
+*.bak2
+frontend-react/src/*.bak*
+
+# Logs
+*.log
+agentes_run.log
+run_agents_teste.log
+
+# Build e testes
+dist/
+build/
+.pytest_cache/
+.coverage
+
+# Sistema
+.DS_Store
+Thumbs.db
