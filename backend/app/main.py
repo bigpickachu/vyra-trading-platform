@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from app.core.firebase import gravar_indicacao, atualizar_resultado, listar_indicacoes, obter_pendentes, calcular_confianca, get_firestore
 from app.core.agents import correr_agentes
 from app.core.forecaster import get_forecaster
+from app.core.alertas import alertas_checker
 from app.db.database import get_db
 from app.models.ohlcv import OHLCV
 from app.core.backtester import Backtester
@@ -541,8 +542,20 @@ scheduler = AsyncIOScheduler()
 @app.on_event("startup")
 async def arrancar_scheduler():
     scheduler.add_job(executar_tick, "interval", seconds=30, id="tick_bot")
+    # Job SEPARADO de alertas (5 min): se rebentar, o tick continua vivo.
+    scheduler.add_job(alertas_checker, "interval", minutes=5, id="alertas_checker")
     scheduler.start()
-    print("[SCHEDULER] bot autonomo ativo (a cada 30s)")
+    print("[SCHEDULER] bot autonomo ativo (a cada 30s) + alertas (a cada 5min)")
+
+
+@app.get("/api/alertas")
+def get_alertas(limite: int = 20):
+    """Ultimos alertas disparados (colecao separada, nunca toca no tick)."""
+    try:
+        from app.core.alertas import ultimos_alertas
+        return ultimos_alertas(limite)
+    except Exception as e:
+        return {"erro": str(e)}
 
 
 @app.on_event("shutdown")
