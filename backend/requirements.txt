@@ -8,3 +8,6 @@ alembic==1.13.1
 pandas==2.2.0
 numpy==1.26.3
 pydantic-settings==2.1.0
+# Dependencias reais do bot que faltavam declarar (instaladas no venv):
+firebase-admin==7.6.0
+APScheduler==3.11.3
