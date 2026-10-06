@@ -36,7 +36,7 @@ cd docker && docker compose up -d   # PostgreSQL em :5432
 ```
 
 ## Ferramentas WSL
-Testes isolados das IAs e scripts de operação (pasta `vyra-wsl/`, correm dentro do WSL): `ia-tests/teste_kronos.py` (previsão standalone de 24 velas), `ia-tests/run_agents_teste.py` (runner falso que testa o pipeline sem gastar quota), `ia-tests/simulacao_retroativa.py` (simulação de 30 dias com fonte isolada), `scripts/arrancar_vyra.sh` (arranque do backend com venv + `FIREBASE_KEY_PATH`) e `scripts/patch*.py` (patches idempotentes ao venv dos TradingAgents: tool budget e fundamentals crypto-aware).
+Testes isolados das IAs e scripts de operação (pasta `vyra-wsl/`, correm dentro do WSL): `ia-tests/teste_kronos.py` (previsão standalone de 24 velas), `ia-tests/run_agents_teste.py` (runner falso que testa o pipeline sem gastar quota), a simulação de 30 dias (`backend/simulacao_retroativa.py`, fonte isolada), `scripts/arrancar_vyra.sh` (arranque do backend com venv + `FIREBASE_KEY_PATH`) e `scripts/patch*.py` (patches idempotentes ao venv dos TradingAgents: tool budget e fundamentals crypto-aware).
 
 ## Endpoints principais
 | Método | Rota | Para quê |
