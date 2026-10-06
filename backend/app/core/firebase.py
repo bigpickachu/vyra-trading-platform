@@ -104,9 +104,23 @@ def calcular_confianca():
                 alvo["neutros"] += 1
 
     def com_precisao(d):
+        # Melhoria A: a precisao vem com intervalo de Wilson e flag de
+        # amostra insuficiente — campos ADITIVOS, veredictos intocados.
+        import math
         out = dict(d)
         avaliados = d["acertos"] + d["erros"]
-        out["precisao"] = round(d["acertos"] / avaliados * 100, 1) if avaliados > 0 else None
+        if avaliados > 0:
+            p = d["acertos"] / avaliados
+            z, den = 1.96, 1 + 1.96 * 1.96 / avaliados
+            centro = p + 1.96 * 1.96 / (2 * avaliados)
+            margem = 1.96 * math.sqrt(p * (1 - p) / avaliados + 1.96 * 1.96 / (4 * avaliados * avaliados))
+            out["precisao"] = round(p * 100, 1)
+            out["ic95"] = [round(max(0.0, (centro - margem) / den) * 100, 1),
+                           round(min(1.0, (centro + margem) / den) * 100, 1)]
+        else:
+            out["precisao"] = None
+            out["ic95"] = None
+        out["amostra_suficiente"] = avaliados >= 10
         return out
 
     return {
