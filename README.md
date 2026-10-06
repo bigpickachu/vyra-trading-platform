@@ -3,6 +3,14 @@ Plataforma de trading algorítmico com confluência de três fontes de inteligê
 
 O conceito: o bot decide em três camadas, cada uma na sua frequência — indicadores técnicos (RSI/EMA) a cada tick, o modelo preditivo Kronos a cada vela de 1h (com cache por símbolo+timestamp), e agentes de contexto em background via subprocess. Uma compra só acontece quando os indicadores e o Kronos concordam (a indisponibilidade do Kronos bloqueia a compra por defeito: disciplina sobre oportunismo). Cada decisão é gravada no Firestore com a fonte que a gerou e recebe depois um veredicto contra a cotação real — por isso o sistema mede-se a si próprio.
 
+## Demo (6 gestos, sem ler código)
+1. Abre o dashboard (`frontend-react`, `npm run dev` → http://localhost:5173).
+2. Repara na **linha roxa tracejada** sobre o gráfico: são as próximas 24 velas previstas pelo Kronos.
+3. Abre o painel de IA: precisão geral e **por fonte** (`kronos+rsi` vs `so-rsi`).
+4. Abre o histórico de indicações: cada decisão com fonte, preço de entrada e veredicto.
+5. Força um ciclo: compra em confluência → vê a indicação gravada → corre o worker → vê o veredicto `ACERTOU`/`ERROU`.
+6. Confirma no console do Firestore: coleções `indicacoes` (decisões) e `agent_reports` (veredictos dos agentes).
+
 ## Stack
 Backend: Python + FastAPI · Frontend: React + TypeScript · Velas: PostgreSQL/TimescaleDB · Decisões: Firebase Firestore · IA: Kronos (previsão das próximas 24 velas) + TradingAgents (análise multi-agente) · Autonomia: APScheduler (tick a cada 30s, com throttle anti-duplicação de 25s contra o polling de 5s do frontend) · DB local: Docker Compose.
 
