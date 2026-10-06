@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import axios from 'axios';
-import { createChart, CandlestickSeries, ColorType } from 'lightweight-charts';
+import { createChart, CandlestickSeries, LineSeries, ColorType } from 'lightweight-charts';
 
 const fmt = (val: any, digits: number = 2) => {
   if (val === undefined || val === null || isNaN(Number(val))) return '-';
@@ -15,11 +15,21 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<any>(null);
+  // memoria das velas para o polling (que corre uma unica vez) saber se ja as temos
+  const candlesRef = useRef<any[]>([]);
 
   const [ptState, setPtState] = useState<any>(null);
   const [ptMetrics, setPtMetrics] = useState<any>(null);
   const [ptMarket, setPtMarket] = useState<any>(null);
   const [livePrice, setLivePrice] = useState<number>(0);
+
+  // IA (kronos + firebase + agentes)
+  const [confianca, setConfianca] = useState<any>(null);
+  const [historico, setHistorico] = useState<any[]>([]);
+  const [verHistorico, setVerHistorico] = useState(false);
+  const [forecast, setForecast] = useState<any[]>([]);
+  const [aCarregarForecast, setACarregarForecast] = useState(false);
+  const [opiniaoAgentes, setOpiniaoAgentes] = useState<any>(null);
 
   const [symbol, setSymbol] = useState<string>('BTCUSDT');
   const [interval, setInterval] = useState<string>('1h');
@@ -58,9 +68,7 @@ function App() {
   const startPaperTrade = () => {
     axios.post(`/api/paper-trade/start?symbol=${symbol}&capital=${capital}&stop_loss=${stopLoss}&take_profit=${takeProfit}&rsi_buy=${rsiBuy}&rsi_sell=${rsiSell}&direction=${direction}`)
       .then(res => {
-        // Atualiza o estado IMEDIATAMENTE
         if (res.data.state) setPtState(res.data.state);
-        // Carrega o gráfico
         return axios.get(`/api/candles?symbol=${symbol}&interval=1m&limit=50`);
       })
       .then(res => {
@@ -72,7 +80,6 @@ function App() {
   const stopPaperTrade = () => {
     axios.post('/api/paper-trade/stop')
       .then(() => {
-        // Limpa o estado IMEDIATAMENTE
         setPtState(null);
         setPtMetrics(null);
         setPtMarket(null);
@@ -81,14 +88,60 @@ function App() {
       .catch(err => console.error('Erro:', err));
   };
 
-  // POLLING - Atualiza apenas os números em tempo real (não mexe no gráfico)
+  // confianca + opiniao dos agentes: carrega no arranque e refresca a cada minuto
+  useEffect(() => {
+    const buscar = () => {
+      axios.get('/api/confianca').then(res => setConfianca(res.data)).catch(() => {});
+      axios.get('/api/agents/status/BTC-USD')
+        .then(res => setOpiniaoAgentes(res.data.ultimo_veredicto))
+        .catch(() => {});
+    };
+    buscar();
+    const id = setInterval(buscar, 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  const abrirHistorico = () => {
+    if (!verHistorico) {
+      axios.get('/api/indicacoes?limite=100').then(res => setHistorico(res.data || [])).catch(() => {});
+    }
+    setVerHistorico(!verHistorico);
+  };
+
+  // forecast: recarrega ao mudar de ativo ou a pedido
+  const carregarForecast = () => {
+    setACarregarForecast(true);
+    axios.get(`/api/forecast?symbol=${symbol}`)
+      .then(res => {
+        if (res.data && res.data.series) setForecast(res.data.series);
+      })
+      .catch(() => {})
+      .finally(() => setACarregarForecast(false));
+  };
+
+  useEffect(() => {
+    carregarForecast();
+  }, [symbol]);
+
+  // POLLING - atualiza os numeros sem mexer no grafico
   useEffect(() => {
     const poll = () => {
       axios.get('/api/paper-trade/status')
         .then(res => {
           if (res.data && res.data.active && res.data.state) {
-            // Só atualiza se houver mudança para evitar re-renders desnecessários
+            // evita re-renders desnecessarios
             setPtState(prev => JSON.stringify(prev) !== JSON.stringify(res.data.state) ? res.data.state : prev);
+
+            // velas: so busca uma vez, se a pagina foi refrescada com o bot ja ativo
+            if (candlesRef.current.length === 0) {
+              axios.get(`/api/candles?symbol=${res.data.state.symbol}&interval=1m&limit=50`)
+                .then(r => {
+                  candlesRef.current = r.data.data || [];
+                  setCandles(candlesRef.current);
+                })
+                .catch(() => {});
+            }
+
             return axios.get('/api/paper-trade/tick');
           } else {
             setPtState(null);
@@ -115,7 +168,7 @@ function App() {
     return () => clearInterval(intervalId);
   }, []);
 
-  // GRÁFICO - Só recria quando as velas mudam
+  // GRAFICO - recria quando as velas ou a previsao mudam
   useEffect(() => {
     if (!chartRef.current || candles.length === 0) return;
     try {
@@ -130,7 +183,20 @@ function App() {
         upColor: '#26a69a', downColor: '#ef5350', borderUpColor: '#26a69a', borderDownColor: '#ef5350', wickUpColor: '#26a69a', wickDownColor: '#ef5350',
       });
       candleSeries.setData(candles);
-      const trades = mode === 'backtest' ? (data?.trades || []) : (ptState?.trades || []);
+
+      // previsao do kronos por cima das velas (remove o timestamp repetido da ancoragem)
+      if (forecast.length > 0) {
+        const semRepetidos = forecast.filter((p: any, i: number) => i === 0 || Number(p.time) !== Number(forecast[i - 1].time));
+        const seriePrevisao = chart.addSeries(LineSeries, {
+          color: '#a855f7', lineWidth: 2, lineStyle: 2,
+          lastValueVisible: false, priceLineVisible: false,
+        });
+        seriePrevisao.setData(semRepetidos.map((p: any) => ({ time: Number(p.time), value: Number(p.value) })));
+      }
+
+      const trades = mode === 'paper' 
+        ? (ptState?.trades || []) 
+        : (data?.trades || []).slice(-8);
       trades.forEach((t: any) => {
         let color = '#ef5350';
         let title = 'SELL';
@@ -144,8 +210,8 @@ function App() {
       const handleResize = () => { if (chartRef.current) chart.applyOptions({ width: chartRef.current.clientWidth }); };
       window.addEventListener('resize', handleResize);
       return () => { window.removeEventListener('resize', handleResize); };
-    } catch (err) { console.error("Erro gráfico:", err); }
-  }, [candles]); // Dependência simplificada
+    } catch (err) { console.error("Erro grafico:", err); }
+  }, [candles, forecast]);
 
   const isProfit = mode === 'backtest' ? (data && !data.error ? Number(data.total_return) >= 0 : false) : (ptState ? (ptState.equity - ptState.initial_capital) >= 0 : false);
   const currentReturn = mode === 'backtest' ? (data ? Number(data.total_return) : 0) : (ptState ? ((ptState.equity - ptState.initial_capital) / ptState.initial_capital) * 100 : 0);
@@ -154,6 +220,8 @@ function App() {
   const labelStyle: React.CSSProperties = { color: '#8b949e', fontSize: 12, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 };
   const inputStyle: React.CSSProperties = { width: '100%', padding: 10, backgroundColor: '#0f111a', color: '#e2e8f0', border: '1px solid #2d2d3a', borderRadius: 4, fontSize: 14, boxSizing: 'border-box' };
 
+  const corResultado = (r: string) => r === 'ACERTOU' ? '#26a69a' : r === 'ERROU' ? '#ef5350' : '#8b949e';
+
   return (
     <div style={{ minHeight: '100vh', padding: 40, backgroundColor: '#0a0b10', color: '#e2e8f0', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif' }}>
       <div style={{ maxWidth: 1440, margin: '0 auto' }}>
@@ -161,7 +229,7 @@ function App() {
         <header style={{ marginBottom: 40, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <h1 style={{ fontSize: 24, fontWeight: 600, color: '#e2e8f0', margin: 0, letterSpacing: -0.5 }}>VYRA TRADING PLATFORM</h1>
-            <p style={{ color: '#8b949e', fontSize: 13, marginTop: 8 }}>Estratégia: EMA Cross + RSI Filter + MACD + Bollinger + Stochastic</p>
+            <p style={{ color: '#8b949e', fontSize: 13, marginTop: 8 }}>Estratégia: EMA Cross + RSI Filter + MACD + Bollinger + Stochastic | Previsão: Kronos</p>
           </div>
           <div style={{ display: 'flex', backgroundColor: '#161822', borderRadius: 4, padding: 4, border: '1px solid #2d2d3a' }}>
             <button onClick={() => setMode('backtest')} style={{ padding: '8px 16px', borderRadius: 4, border: 'none', cursor: 'pointer', fontWeight: 500, fontSize: 13, backgroundColor: mode === 'backtest' ? '#2d2d3a' : 'transparent', color: mode === 'backtest' ? '#e2e8f0' : '#8b949e' }}>Backtest Histórico</button>
@@ -182,7 +250,6 @@ function App() {
         <div style={{ backgroundColor: '#161822', border: '1px solid #2d2d3a', borderRadius: 6, padding: 24, marginBottom: 24, display: 'flex', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 180 }}>
             <label style={labelStyle}>Ativo</label>
-            {/* Dropdown NUNCA bloqueia no Backtest */}
             <select value={symbol} onChange={(e) => setSymbol(e.target.value)} disabled={mode === 'paper' && ptState?.active} style={{...inputStyle, opacity: (mode === 'paper' && ptState?.active) ? 0.5 : 1}}>
               {symbols.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
             </select>
@@ -208,6 +275,105 @@ function App() {
           )}
           {mode === 'paper' && ptState?.active && (
             <button onClick={stopPaperTrade} style={{ padding: '10px 24px', backgroundColor: '#ef5350', color: '#fff', border: 'none', borderRadius: 4, fontWeight: 500, fontSize: 13, cursor: 'pointer' }}>Parar Bot</button>
+          )}
+        </div>
+
+        {/* painel de IA: confianca por fonte + opiniao dos agentes + historico + forecast */}
+        <div style={{ backgroundColor: '#161822', border: '1px solid #2d2d3a', borderRadius: 6, padding: 24, marginBottom: 24 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+            <h2 style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0', textTransform: 'uppercase', letterSpacing: 0.5, margin: 0 }}>IA — Confiança e Indicações</h2>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={carregarForecast} style={{ padding: '8px 14px', borderRadius: 4, border: '1px solid #3b2d4f', backgroundColor: '#0f111a', color: '#a855f7', fontSize: 12, cursor: 'pointer' }}>{aCarregarForecast ? 'A prever...' : 'Atualizar Previsão'}</button>
+              <button onClick={abrirHistorico} style={{ padding: '8px 14px', borderRadius: 4, border: '1px solid #3b2d4f', backgroundColor: '#0f111a', color: '#e2e8f0', fontSize: 12, cursor: 'pointer' }}>{verHistorico ? 'Fechar' : 'Ver Indicações'}</button>
+            </div>
+          </div>
+
+          {confianca && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              <div style={{ backgroundColor: '#0f111a', border: '1px solid #2d2d3a', borderRadius: 4, padding: 14, textAlign: 'center' }}>
+                <div style={labelStyle}>Precisão Geral</div>
+                <div style={{ fontSize: 26, fontWeight: 700, color: confianca.geral?.precisao != null && confianca.geral.precisao >= 50 ? '#26a69a' : '#ef5350' }}>
+                  {confianca.geral?.precisao != null ? confianca.geral.precisao + '%' : '—'}
+                </div>
+                <div style={{ color: '#8b949e', fontSize: 11 }}>{confianca.geral?.total || 0} indicações</div>
+              </div>
+              {Object.entries(confianca.por_fonte || {}).map(([fonte, v]: any) => (
+                <div key={fonte} style={{ backgroundColor: '#0f111a', border: '1px solid #2d2d3a', borderRadius: 4, padding: 14, textAlign: 'center' }}>
+                  <div style={labelStyle}>{fonte}</div>
+                  <div style={{ fontSize: 26, fontWeight: 700, color: v.precisao != null && v.precisao >= 50 ? '#26a69a' : '#ef5350' }}>
+                    {v.precisao != null ? v.precisao + '%' : '—'}
+                  </div>
+                  <div style={{ color: '#8b949e', fontSize: 11 }}>{v.total} indicações ({v.acertos}✓ {v.erros}✗ {v.neutros}≈)</div>
+                </div>
+              ))}
+
+              {/* opiniao dos agentes */}
+              <div style={{ backgroundColor: '#0f111a', border: '1px solid #2d2d3a', borderRadius: 4, padding: 14, textAlign: 'center' }}>
+                <div style={labelStyle}>Opinião dos Agentes</div>
+                {opiniaoAgentes ? (
+                  <>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: opiniaoAgentes.decisao && opiniaoAgentes.decisao.includes('BUY') ? '#26a69a' : opiniaoAgentes.decisao && opiniaoAgentes.decisao.includes('SELL') ? '#ef5350' : '#e2e8f0' }}>
+                      {opiniaoAgentes.decisao}
+                    </div>
+                    <div style={{ color: '#8b949e', fontSize: 11 }}>
+                      {opiniaoAgentes.symbol} · {opiniaoAgentes.timestamp ? new Date(opiniaoAgentes.timestamp).toLocaleString('pt-PT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ color: '#8b949e', fontSize: 12, padding: 10 }}>Sem analise ainda</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div style={{ color: '#8b949e', fontSize: 12, marginTop: 10 }}>
+            {aCarregarForecast ? 'A calcular previsão (demora na primeira vez)...' : forecast.length > 0 ? 'Previsão ativa no gráfico (' + forecast.length + ' velas)' : 'Sem previsão carregada'}
+          </div>
+
+          <div style={{ marginTop: 10 }}>
+            <button
+              onClick={() => {
+                axios.post('/api/agents/analyze')
+                  .then(() => setOpiniaoAgentes(null))
+                  .catch(() => {});
+              }}
+              style={{ padding: '8px 16px', borderRadius: 4, border: '1px solid #3b2d4f', backgroundColor: '#0f111a', color: '#a855f7', fontSize: 12, cursor: 'pointer' }}
+            >
+              Analisar com Agentes
+            </button>
+            <span style={{ color: '#8b949e', fontSize: 11, marginLeft: 10 }}>demora alguns minutos — o card atualiza sozinho no próximo ciclo</span>
+          </div>
+
+          {verHistorico && (
+            <div style={{ marginTop: 16, overflowX: 'auto', maxHeight: '320px', overflowY: 'auto', border: '1px solid #2d2d3a', borderRadius: 4 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead style={{ position: 'sticky', top: 0, backgroundColor: '#161822' }}>
+                  <tr style={{ borderBottom: '1px solid #2d2d3a', textAlign: 'left' }}>
+                    {['Data', 'Símbolo', 'Indicação', 'Fonte', 'Preço Início', 'Preço Fim', 'Variação', 'Resultado'].map(h => (
+                      <th key={h} style={{ padding: 10, color: '#8b949e', fontWeight: 500, textTransform: 'uppercase', fontSize: 11 }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {historico.map((ind: any) => {
+                    const varColor = Number(ind.variacao_real) > 0 ? '#26a69a' : Number(ind.variacao_real) < 0 ? '#ef5350' : '#8b949e';
+                    return (
+                      <tr key={ind.id} style={{ borderBottom: '1px solid #1e212b' }}>
+                        <td style={{ padding: 10, color: '#e2e8f0' }}>{ind.timestamp ? new Date(ind.timestamp).toLocaleString('pt-PT', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-'}</td>
+                        <td style={{ padding: 10, color: '#e2e8f0' }}>{ind.symbol}</td>
+                        <td style={{ padding: 10, fontWeight: 600, color: ind.indicacao === 'BUY' ? '#26a69a' : ind.indicacao === 'SHORT' ? '#ff9800' : '#e2e8f0' }}>{ind.indicacao}</td>
+                        <td style={{ padding: 10, color: '#a855f7', fontSize: 12 }}>{ind.fonte}</td>
+                        <td style={{ padding: 10, color: '#e2e8f0' }}>${fmt(ind.preco_inicio)}</td>
+                        <td style={{ padding: 10, color: '#e2e8f0' }}>{ind.preco_fim != null ? '$' + fmt(ind.preco_fim) : '—'}</td>
+                        <td style={{ padding: 10, fontWeight: 600, color: varColor }}>{ind.variacao_real != null ? (ind.variacao_real > 0 ? '+' : '') + fmt(ind.variacao_real) + '%' : '—'}</td>
+                        <td style={{ padding: 10, fontWeight: 700, color: corResultado(ind.resultado || '') }}>{ind.resultado || 'pendente'}</td>
+                      </tr>
+                    );
+                  })}
+                  {historico.length === 0 && (<tr><td colSpan={8} style={{ padding: 20, textAlign: 'center', color: '#8b949e' }}>Sem indicações registadas.</td></tr>)}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
 
@@ -245,7 +411,10 @@ function App() {
                 <div style={cardStyle}>
                   <div style={labelStyle}>Estado do Mercado (1m)</div>
                   <div style={{ fontSize: 16, fontWeight: 600, color: '#e2e8f0' }}>RSI: <span style={{color: ptMarket.rsi < (ptState?.rsi_buy_threshold || 45) ? '#26a69a' : '#ef5350'}}>{fmt(ptMarket.rsi)}</span></div>
-                  <div style={{ fontSize: 12, color: '#8b949e', marginTop: 8 }}>Ação: <span style={{ fontWeight: 600, color: ptMarket.action === 'BUY' ? '#26a69a' : ptMarket.action === 'SELL' ? '#ef5350' : ptMarket.action === 'SHORT' || ptMarket.action === 'COVER' ? '#ff9800' : '#8b949e' }}>{ptMarket.action}</span></div>
+                  <div style={{ fontSize: 12, color: '#8b949e', marginTop: 6 }}>Ação: <span style={{ fontWeight: 600, color: ptMarket.action === 'BUY' ? '#26a69a' : ptMarket.action === 'SELL' ? '#ef5350' : ptMarket.action === 'SHORT' || ptMarket.action === 'COVER' ? '#ff9800' : '#8b949e' }}>{ptMarket.action}</span></div>
+                  <div style={{ fontSize: 12, color: '#8b949e', marginTop: 6 }}>Kronos: <span style={{ fontWeight: 600, color: ptMarket.kronos_trend === 1 ? '#26a69a' : ptMarket.kronos_trend === -1 ? '#ef5350' : '#8b949e' }}>
+                    {ptMarket.kronos_trend === 1 ? 'sobe' : ptMarket.kronos_trend === -1 ? 'desce' : 'neutro'}
+                  </span></div>
                 </div>
               )}
               <div style={cardStyle}>
@@ -276,12 +445,15 @@ function App() {
             <div style={{ backgroundColor: '#161822', border: '1px solid #2d2d3a', borderRadius: 6, padding: 24, marginBottom: 24 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
                 <h2 style={{ fontSize: 14, fontWeight: 600, color: '#e2e8f0', textTransform: 'uppercase', letterSpacing: 0.5, margin: 0 }}>Gráfico de Velas {mode === 'paper' ? '(1m)' : ''}</h2>
-                {mode === 'paper' && ptState?.active && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#26a69a' }} />
-                    <span style={{ color: '#26a69a', fontSize: 12, fontWeight: 500 }}>ATIVO • 5s • SL {ptState.stop_loss_pct*100}% • TP {ptState.take_profit_pct*100}%</span>
-                  </div>
-                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+                  <span style={{ color: '#a855f7', fontSize: 12, fontWeight: 500 }}>--- Previsão Kronos (24 velas)</span>
+                  {mode === 'paper' && ptState?.active && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#26a69a' }} />
+                      <span style={{ color: '#26a69a', fontSize: 12, fontWeight: 500 }}>ATIVO • 5s • SL {ptState.stop_loss_pct*100}% • TP {ptState.take_profit_pct*100}%</span>
+                    </div>
+                  )}
+                </div>
               </div>
               <div ref={chartRef} style={{ width: '100%', borderRadius: 4, overflow: 'hidden', minHeight: '450px' }} />
             </div>
