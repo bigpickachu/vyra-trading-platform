@@ -1,9 +1,12 @@
 """Motor multi-agente — invocado via subprocess (venv isolado)."""
+import os
 import subprocess
 import json
 
-RUNNER = "/home/francfrancisco/vyra-ia/run_agents_teste.py"
-PYTHON = "/home/francfrancisco/vyra-ia/venv/bin/python"
+# Caminhos via env, com fallback aos valores da maquina original.
+# (Comportamento identico quando as variaveis nao existem.)
+RUNNER = os.getenv("VYRA_AGENTS_RUNNER", "/home/francfrancisco/vyra-ia/run_agents_teste.py")
+PYTHON = os.getenv("VYRA_AGENTS_PYTHON", "/home/francfrancisco/vyra-ia/venv/bin/python")
 
 
 def correr_agentes(symbol: str, trade_date: str) -> dict:
