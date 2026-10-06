@@ -12,6 +12,7 @@ from app.core.firebase import gravar_indicacao, atualizar_resultado, listar_indi
 from app.core.agents import correr_agentes
 from app.core.forecaster import get_forecaster
 from app.core.alertas import alertas_checker
+from app.core.auth import get_current_user_obrigatorio
 from app.db.database import get_db
 from app.models.ohlcv import OHLCV
 from app.core.backtester import Backtester
@@ -561,6 +562,12 @@ def get_alertas(limite: int = 20):
 @app.on_event("shutdown")
 async def parar_scheduler():
     scheduler.shutdown()
+
+# ===== Auth (Fase E) — sonda protegida; rotas existentes intocadas =====
+@app.get("/api/auth/me")
+def auth_me(user=Depends(get_current_user_obrigatorio)):
+    """Prova de integração: devolve quem está logado (401 sem token)."""
+    return {"uid": user["uid"], "email": user["email"]}
 
 # ===== Agentes multi-IA (Fase 3b) =====
 estado_agentes = {}
