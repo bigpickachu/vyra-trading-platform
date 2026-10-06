@@ -13,7 +13,8 @@ import requests
 from app.core.firebase import gravar_indicacao, atualizar_resultado, get_firestore
 
 SYMBOL = "BTCUSDT"
-DIAS = 30
+DIAS = int(os.getenv("DIAS", "30"))
+FONTE_SIM = os.getenv("FONTE_SIM", "backtest")
 RSI_LIMIAR = 45
 BANDA = 0.3          # % para ACERTOU/ERROU (igual ao worker!)
 FREQUENCIA_FORECAST = 7   # previsao do kronos a cada N dias (custo CPU)
@@ -102,7 +103,7 @@ for i in range(14, len(fechamentos) - 1):
         else:
             resultado = "NEUTRO"
 
-        doc_id = gravar_indicacao(SYMBOL, "BUY", preco_hoje, "backtest")
+        doc_id = gravar_indicacao(SYMBOL, "BUY", preco_hoje, FONTE_SIM)
         atualizar_resultado(doc_id, preco_amanha, resultado)
 
         # corrige o timestamp para o dia simulado (nao o dia de hoje!)
