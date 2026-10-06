@@ -113,6 +113,15 @@ for i in range(14, len(fechamentos) - 1):
 
         indicacoes_criadas += 1
         print(f"[{data_dia.date()}] BUY @ {preco_hoje:.2f} -> {variacao:+.2f}% -> {resultado}")
+    else:
+        # B1 (critica aceite): dias SEM sinal também ficam registados.
+        # Sem isto, a precisão seria condicional (só dias de ação) e os
+        # vetos invisíveis — com isto há precisão global = acertos/dias.
+        doc_id = gravar_indicacao(SYMBOL, "VETO", preco_hoje, FONTE_SIM)
+        atualizar_resultado(doc_id, preco_amanha, "SEM SINAL")
+        get_firestore().collection("indicacoes").document(doc_id).update({
+            "timestamp": datetime.fromtimestamp(tempos[i], tz=timezone.utc).isoformat()
+        })
 
 print("=" * 50)
 print(f"Simulacao completa: {indicacoes_criadas} indicacoes gravadas!")
