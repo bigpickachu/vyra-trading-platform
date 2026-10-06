@@ -9,6 +9,7 @@ import time
 
 from app.db.database import get_db
 from app.models.ohlcv import OHLCV
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.core.backtester import Backtester
 
 app = FastAPI(title="Vyra Trading API")
@@ -195,23 +196,50 @@ def stop_paper_trade():
     print("Bot parado e estado limpo")
     return {"status": "stopped"}
 
-@app.get("/api/paper-trade/tick")
-async def paper_trade_tick():
+
+# ============================================================
+# LOGICA DO BOT — chamada pelo endpoint E pelo scheduler
+# ============================================================
+async def executar_tick():
     state = load_state()
-    
+
     if not state or not state.get("active"):
         return {"active": False}
+
+    # guard anti-duplicacao: se o ultimo tick foi recente, nao recalcula
+    # (o scheduler corre a cada 30s e o frontend pinga a cada 5s)
+    agora = time.time()
+    ultimo_tick = state.get("last_tick_time")
+    if ultimo_tick and (agora - ultimo_tick) < 25:
+        return {
+            "active": True,
+            "state": state,
+            "metrics": {"total_trades": 0, "winning_trades": 0, "losing_trades": 0, "win_rate": 0, "profit_factor": 0, "avg_win": 0, "avg_loss": 0, "max_drawdown_pct": 0, "total_pnl": 0, "current_streak": 0},
+            "market": {"price": 0, "rsi": 0, "action": "THROTTLED", "kronos_trend": 0, "signals": {}},
+            "throttled": True
+        }
+    state["last_tick_time"] = agora
 
     if state.get("start_time") and (time.time() - state["start_time"]) < 20:
         return {
             "active": True,
             "state": state,
             "metrics": {"total_trades": 0, "winning_trades": 0, "losing_trades": 0, "win_rate": 0, "profit_factor": 0, "avg_win": 0, "avg_loss": 0, "max_drawdown_pct": 0, "total_pnl": 0, "current_streak": 0},
-            "market": {"price": 0, "rsi": 0, "action": "INITIALIZING", "signals": {}}
+            "market": {"price": 0, "rsi": 0, "action": "INITIALIZING", "kronos_trend": 0, "signals": {}}
         }
 
     symbol = state["symbol"]
-    
+
+    # tendencia prevista pelo kronos (vem com cache, quase instantaneo)
+    kronos_trend = 0  # 0 = neutro/indisponivel -> bloqueia BUY (disciplina)
+    try:
+        async with httpx.AsyncClient() as client:
+            fr = await client.get(f"http://127.0.0.1:8000/api/forecast?symbol={symbol}", timeout=180)
+        if fr.status_code == 200 and "trend" in fr.json():
+            kronos_trend = fr.json()["trend"]
+    except Exception as e:
+        print(f"[KRONOS] indisponivel: {e}")
+
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=50")
@@ -221,7 +249,7 @@ async def paper_trade_tick():
 
     closes = [float(k[4]) for k in klines]
     current_price = closes[-1]
-    current_time = int(klines[-1][0] / 1000)
+    current_time = int(time.time())  # relogio real (cooldowns em segundos)
 
     def calc_rsi(prices, period=14):
         if len(prices) < period + 1: return 50
@@ -363,3 +391,67 @@ async def paper_trade_tick():
         "metrics": {"total_trades": total_trades, "winning_trades": winning_trades, "losing_trades": losing_trades, "win_rate": round(win_rate, 2), "profit_factor": round(profit_factor, 2), "avg_win": round(avg_win, 2), "avg_loss": round(avg_loss, 2), "max_drawdown_pct": round(state["max_drawdown_pct"], 2), "total_pnl": round(state["total_pnl"], 2), "current_streak": state["current_streak"]},
         "market": {"price": current_price, "rsi": round(rsi, 2), "action": action, "signals": {"ema": "BULLISH" if ema_bullish else "BEARISH", "rsi": "OK" if rsi < state["rsi_buy_threshold"] else "HIGH"}}
     }
+@app.post("/api/worker/fecho-diario")
+async def worker_fecho_diario(symbol: str = None):
+    """Avalia indicacoes pendentes contra a cotacao real. Resultado: ACERTOU/ERROU/NEUTRO."""
+    pendentes = obter_pendentes(symbol)
+    if not pendentes:
+        return {"avaliadas": 0, "mensagem": "Sem indicacoes pendentes."}
+
+    precos = {}
+    resultados = []
+
+    async with httpx.AsyncClient() as client:
+        for doc in pendentes:
+            sym = doc.get("symbol")
+            if not sym or not doc.get("preco_inicio"):
+                continue
+
+            if sym not in precos:
+                try:
+                    r = await client.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}")
+                    precos[sym] = float(r.json()["price"])
+                except Exception as e:
+                    print(f"[WORKER] falha Binance {sym}: {e}")
+                    precos[sym] = None
+
+            preco_fim = precos.get(sym)
+            if preco_fim is None:
+                continue
+
+            pi = doc["preco_inicio"]
+            variacao = round((preco_fim - pi) / pi * 100, 2)
+
+            ind = doc.get("indicacao", "BUY")
+            if ind == "SHORT":
+                resultado = "ACERTOU" if variacao <= -0.3 else ("ERROU" if variacao >= 0.3 else "NEUTRO")
+            else:
+                resultado = "ACERTOU" if variacao >= 0.3 else ("ERROU" if variacao <= -0.3 else "NEUTRO")
+
+            try:
+                atualizar_resultado(doc["id"], preco_fim, resultado)
+                resultados.append({"id": doc["id"], "indicacao": ind,
+                                   "preco_inicio": pi, "preco_fim": preco_fim,
+                                   "variacao": variacao, "resultado": resultado})
+            except Exception as e:
+                print(f"[WORKER] erro ao atualizar {doc['id']}: {e}")
+
+    return {"avaliadas": len(resultados), "detalhes": resultados}
+# ===== Grau de Confianca (Fase 4) =====
+@app.get("/api/confianca")
+def get_confianca():
+    """Grau de confianca do sistema: precisao geral e por fonte de decisao."""
+    return calcular_confianca()
+# ===== Scheduler: autonomia do bot =====
+scheduler = AsyncIOScheduler()
+
+@app.on_event("startup")
+async def arrancar_scheduler():
+    scheduler.add_job(executar_tick, "interval", seconds=30, id="tick_bot")
+    scheduler.start()
+    print("[SCHEDULER] bot autonomo ativo (a cada 30s)")
+
+
+@app.on_event("shutdown")
+async def parar_scheduler():
+    scheduler.shutdown()
